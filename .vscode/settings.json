@@ -1,0 +1,26 @@
+{
+  "yaml.schemas": {
+    "https://json.schemastore.org/kubernetes.json": [
+      "manifests/**/*.yaml"
+    ]
+  },
+  "editor.formatOnSave": true,
+  "files.trimTrailingWhitespace": true,
+  "editor.tabSize": 2,
+  "files.exclude": {
+    "**/.DS_Store": true,
+    "**/node_modules": true,
+    "**/dist": true
+  },
+  "cSpell.language": "en,en-US",
+  "cSpell.words": [
+    "k8s",
+    "ingress",
+    "podspec",
+    "envFrom",
+    "readiness",
+    "liveness",
+    "configmap",
+    "statefulset"
+  ]
+}

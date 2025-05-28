@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: api-config
+  namespace: workload-suite
+data:
+  LOG_LEVEL: debug
+  TIMEOUT: "30"

@@ -1,0 +1,32 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: batch-processor
+  namespace: workload-suite
+  labels:
+    app: batch-processor
+spec:
+  backoffLimit: 3                        
+  activeDeadlineSeconds: 300
+  template:
+    metadata:
+      labels:
+        app: batch-processor
+    spec:
+      priorityClassName: low-priority
+      restartPolicy: OnFailure
+      containers:
+      - name: report-worker
+        image: ghcr.io/example/batch-worker:latest
+        command: ["python", "process.py"]
+        envFrom:
+        - configMapRef:
+            name: batch-config
+        - secretRef:
+            name: batch-secrets
+        volumeMounts:
+        - name: temp-workdir
+          mountPath: /tmp/data
+      volumes:
+      - name: temp-workdir
+        emptyDir: {}

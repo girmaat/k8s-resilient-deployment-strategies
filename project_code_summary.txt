@@ -1,0 +1,1785 @@
+1. manifests/base/namespace.yaml
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: workload-suite
+  labels:
+    name: workload-suite
+
+
+
+2. manifests/base/priorityclasses.yaml
+
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: high-priority
+value: 1000
+globalDefault: false
+description: "Critical workloads like API gateway"
+
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: low-priority
+value: 100
+globalDefault: false
+description: "Background or batch jobs"
+
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: default-priority
+value: 500
+globalDefault: true
+description: "Default priority for other pods"
+
+
+
+3. manifests/base/pdbs.yaml
+
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: api-gateway-pdb
+  namespace: workload-suite
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: api-gateway
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: frontend-ui-pdb
+  namespace: workload-suite
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: frontend-ui
+
+
+
+4. manifests/base/serviceaccounts.yaml
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: api-gateway-sa
+  namespace: workload-suite
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: frontend-ui-sa
+  namespace: workload-suite
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: db-access-sa
+  namespace: workload-suite
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: node-logger-sa
+  namespace: workload-suite
+
+
+5. manifests/deployments/frontend-ui.yaml
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend-ui
+  namespace: workload-suite
+  labels:
+    app: frontend-ui
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: frontend-ui
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: frontend-ui
+      annotations:
+        prometheus.io/scrape: "true"         # 👈 Enable metrics collection
+        prometheus.io/port: "3000"           # 👈 Should match container port
+        prometheus.io/path: "/metrics"       # 👈 Optional (defaults to /metrics)
+    spec:
+      serviceAccountName: frontend-ui-sa
+      priorityClassName: default-priority
+      containers:
+      - name: frontend
+        image: ghcr.io/example/frontend-ui:latest
+        ports:
+        - containerPort: 3000
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 3000
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 3000
+          initialDelaySeconds: 10
+          periodSeconds: 5
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 3000
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          failureThreshold: 20
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "128Mi"
+          limits:
+            cpu: "250m"
+            memory: "256Mi"
+
+
+
+6. manifests/deployments/api-gateway.yaml
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-gateway
+  namespace: workload-suite
+  labels:
+    app: api-gateway
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: api-gateway
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: api-gateway
+      annotations:
+        prometheus.io/scrape: "true"         # 👈 Enables Prometheus scraping
+        prometheus.io/port: "8080"           # 👈 Must match containerPort
+        prometheus.io/path: "/metrics"       # 👈 Optional, defaults to /metrics
+    spec:
+      serviceAccountName: api-gateway-sa
+      priorityClassName: high-priority
+      containers:
+      - name: api-gateway
+        image: ghcr.io/example/api-gateway:latest
+        ports:
+        - containerPort: 8080
+        envFrom:
+        - configMapRef:
+            name: api-config
+        - secretRef:
+            name: api-secret
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 5
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          failureThreshold: 20
+        resources:
+          requests:
+            cpu: "200m"
+            memory: "256Mi"
+          limits:
+            cpu: "500m"
+            memory: "512Mi"
+
+
+
+7. manifests/statefulsets/stateful-db.yaml
+
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: stateful-db
+  namespace: workload-suite
+  labels:
+    app: stateful-db
+spec:
+  serviceName: stateful-db-headless        
+  replicas: 2
+  selector:
+    matchLabels:
+      app: stateful-db
+  template:
+    metadata:
+      labels:
+        app: stateful-db
+    spec:
+      serviceAccountName: db-access-sa
+      terminationGracePeriodSeconds: 30
+      containers:
+      - name: postgres
+        image: postgres:15
+        ports:
+        - containerPort: 5432
+        env:
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: db-secret
+              key: password
+        volumeMounts:
+        - name: db-storage
+          mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:
+  - metadata:
+      name: db-storage
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 5Gi
+      storageClassName: gp2
+
+
+
+8. manifests/daemonsets/node-logger.yaml
+
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: node-logger
+  namespace: workload-suite
+  labels:
+    app: node-logger
+spec:
+  selector:
+    matchLabels:
+      app: node-logger
+  template:
+    metadata:
+      labels:
+        app: node-logger
+    spec:
+      serviceAccountName: node-logger-sa
+      priorityClassName: low-priority
+      tolerations:
+        - effect: NoSchedule
+          operator: Exists
+      volumes:
+        - name: varlog
+          hostPath:
+            path: /var/log
+        - name: containers
+          hostPath:
+            path: /var/lib/docker/containers
+            type: DirectoryOrCreate
+        - name: temp-buffer
+          emptyDir: {}
+      containers:
+        - name: fluentbit
+          image: fluent/fluent-bit:2.2
+          resources:
+            requests:
+              cpu: 50m
+              memory: 100Mi
+            limits:
+              cpu: 100m
+              memory: 200Mi
+          volumeMounts:
+            - name: varlog
+              mountPath: /var/log
+            - name: containers
+              mountPath: /var/lib/docker/containers
+              readOnly: true
+            - name: temp-buffer
+              mountPath: /fluent-bit/buffer
+          env:
+            - name: FLUENT_ELASTICSEARCH_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: logger-config
+                  key: es-host
+            - name: FLUENT_ELASTICSEARCH_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: logger-config
+                  key: es-port
+
+
+
+9. manifests/jobs/batch-processor.yaml
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: batch-processor
+  namespace: workload-suite
+  labels:
+    app: batch-processor
+spec:
+  backoffLimit: 3                        
+  activeDeadlineSeconds: 300
+  template:
+    metadata:
+      labels:
+        app: batch-processor
+    spec:
+      priorityClassName: low-priority
+      restartPolicy: OnFailure
+      containers:
+      - name: report-worker
+        image: ghcr.io/example/batch-worker:latest
+        command: ["python", "process.py"]
+        envFrom:
+        - configMapRef:
+            name: batch-config
+        - secretRef:
+            name: batch-secrets
+        volumeMounts:
+        - name: temp-workdir
+          mountPath: /tmp/data
+      volumes:
+      - name: temp-workdir
+        emptyDir: {}
+
+
+
+10. manifests/cronjobs/cleanup-task.yaml
+
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: cleanup-task
+  namespace: workload-suite
+  labels:
+    app: cleanup-task
+spec:
+  schedule: "0 */6 * * *"
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 2
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 120                 
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        metadata:
+          labels:
+            app: cleanup-task
+        spec:
+          priorityClassName: low-priority
+          restartPolicy: OnFailure
+          containers:
+          - name: cleaner
+            image: ghcr.io/example/cleanup:latest
+            command: ["/bin/sh", "-c"]
+            args:
+              - python clean_expired.py --retention-days=30
+            env:
+            - name: ENV
+              value: "prod"
+            volumeMounts:
+            - name: temp-workdir
+              mountPath: /tmp/cleanup
+          volumes:
+          - name: temp-workdir
+            emptyDir: {}
+
+
+
+11. manifests/services/frontend-svc.yaml
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend-ui
+  namespace: workload-suite
+  labels:
+    app: frontend-ui
+spec:
+  selector:
+    app: frontend-ui
+  ports:
+  - port: 80
+    targetPort: 3000
+  type: ClusterIP
+
+
+
+12. manifests/services/api-svc.yaml
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: api-gateway
+  namespace: workload-suite
+  labels:
+    app: api-gateway
+spec:
+  selector:
+    app: api-gateway
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: 8080       
+  type: ClusterIP
+
+
+
+13. manifests/services/db-headless-svc.yaml
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: stateful-db-headless
+  namespace: workload-suite
+  labels:
+    app: stateful-db
+spec:
+  ports:
+  - port: 5432
+    targetPort: 5432
+  clusterIP: None                          
+  selector:
+    app: stateful-db
+
+
+
+14. manifests/ingress/ingress.yaml
+
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: workload-suite-ingress
+  namespace: workload-suite
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /$2       
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+spec:
+  ingressClassName: nginx
+  rules:
+  - host: workload.local
+    http:
+      paths:
+      - path: /api(/|$)(.*)
+        pathType: Prefix
+        backend:
+          service:
+            name: api-gateway
+            port:
+              number: 80
+      - path: /ui(/|$)(.*)
+        pathType: Prefix
+        backend:
+          service:
+            name: frontend-ui
+            port:
+              number: 80
+  tls:
+  - hosts:
+    - workload.local
+    secretName: tls-cert
+
+
+
+15. manifests/autoscaling/hpa-api-gateway.yaml
+
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: api-gateway-hpa
+  namespace: workload-suite
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: api-gateway
+  minReplicas: 2
+  maxReplicas: 6
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 60
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 75
+
+
+
+16. manifests/configs/configmap-api.yaml
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: api-config
+  namespace: workload-suite
+data:
+  LOG_LEVEL: debug
+  TIMEOUT: "30"
+
+
+
+17. manifests/configs/secret-api.yaml
+
+apiVersion: v1
+kind: Secret
+metadata:
+  name: api-secret
+  namespace: workload-suite
+type: Opaque
+stringData:
+  API_KEY: supersecretapikey123
+  DB_PASSWORD: notsecurebutdemo
+
+
+
+18. manifests/configs/secret-db.yaml
+
+apiVersion: v1
+kind: Secret
+metadata:
+  name: db-secret
+  namespace: workload-suite
+type: Opaque
+stringData:
+  password: "postgres123"                 
+
+
+19. manifests/configs/configmap-logger.yaml
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: logger-config
+  namespace: workload-suite
+data:
+  es-host: "elasticsearch.logging.svc"
+  es-port: "9200"
+
+
+
+20. manifests/configs/configmap-batch.yaml
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: batch-config
+  namespace: workload-suite
+data:
+  REPORT_TYPE: "daily"
+  TARGET_BUCKET: "analytics-results"
+
+
+
+21. manifests/configs/secret-batch.yaml
+
+apiVersion: v1
+kind: Secret
+metadata:
+  name: batch-secrets
+  namespace: workload-suite
+type: Opaque
+stringData:
+  AWS_ACCESS_KEY_ID: "example-key"
+  AWS_SECRET_ACCESS_KEY: "example-secret"
+
+
+
+22. manifests/configs/configmap-prometheus.yaml
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: workload-suite
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+    scrape_configs:
+    - job_name: 'kubernetes-pods'
+      kubernetes_sd_configs:
+      - role: pod
+      relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+        action: keep
+        regex: true
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+        action: replace
+        target_label: __metrics_path__
+        regex: (.+)
+      - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+        action: replace
+        regex: (.+):(?:\d+);(\d+)
+        replacement: $1:$2
+        target_label: __address__
+
+      metadata:
+       annotations:
+         prometheus.io/scrape: "true"
+         prometheus.io/port: "8080"
+         prometheus.io/path: "/metrics"   # Optional (defaults to /metrics)
+
+
+
+23. manifests/configs/secret-grafana-creds.yaml
+
+apiVersion: v1
+kind: Secret
+metadata:
+  name: grafana-creds
+  namespace: workload-suite
+type: Opaque
+stringData:
+  admin-password: "admin123"
+
+
+24. manifests/configs/secret-tls-cert.yaml
+
+apiVersion: v1
+kind: Secret
+metadata:
+  name: tls-cert
+  namespace: workload-suite
+type: kubernetes.io/tls
+data:
+  tls.crt: ""
+  tls.key: ""
+
+
+
+25. manifests/volumes/storage-class.yaml
+
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: gp2
+provisioner: kubernetes.io/aws-ebs
+parameters:
+  type: gp2
+reclaimPolicy: Retain
+volumeBindingMode: WaitForFirstConsumer
+
+
+
+26. manifests/README.md
+
+# 📦 Kubernetes Manifests
+
+This directory contains all Kubernetes resource definitions grouped by workload type.
+
+## Structure
+
+| Folder | Contents |
+|--------|----------|
+| `base/`           | Global configs: namespaces, ServiceAccounts, PriorityClasses, PDBs |
+| `deployments/`    | Core stateless workloads (API Gateway, Frontend UI) |
+| `statefulsets/`   | Stateful apps like databases (Postgres) |
+| `daemonsets/`     | Node-level agents like loggers |
+| `jobs/`           | One-time tasks like batch processors |
+| `cronjobs/`       | Scheduled automation (e.g., cleanup tasks) |
+| `services/`       | Internal networking via ClusterIP/Headless services |
+| `ingress/`        | External access via NGINX/ALB |
+| `autoscaling/`    | HPA definitions for scaling workloads |
+| `configs/`        | ConfigMaps and Secrets used across the stack |
+| `volumes/`        | Storage classes and persistent volume setup |
+
+## Apply All Manifests
+
+kubectl apply -R -f manifests/
+
+Requirements
+Namespace must exist first: kubectl apply -f base/namespace.yaml
+
+Use --prune or Helm to manage deletions gracefully
+
+
+---
+
+## 📁 `scripts/README.md`
+
+(Already created earlier. No change needed.)
+
+---
+
+## 📁 `observability/README.md`
+
+
+# 🔭 Observability Stack
+
+This folder contains Prometheus and Grafana deployment manifests for cluster and app monitoring.
+
+## Includes
+
+- `prometheus-deployment.yaml`: Single-node Prometheus with ConfigMap-based scrape configs
+- `grafana-deployment.yaml`: Grafana with password-injected via Secret
+- `alert-rules.yaml`: Optional rule set for Prometheus (used via ConfigMap or CRD)
+
+## Related Configs
+
+Prometheus is configured using:
+
+manifests/configs/configmap-prometheus.yaml
+To enable scraping from your apps, annotate pods or deployments like:
+
+metadata:
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "8080"
+
+Access
+Grafana: http://<grafana-svc-ip>:3000
+
+Prometheus: http://<prometheus-svc-ip>:9090
+
+Use port-forwarding for local testing:
+kubectl port-forward svc/grafana 3000:3000 -n workload-suite
+
+
+
+
+
+27. scripts/k8s-security-diagnose.sh
+
+#!/bin/bash
+
+# Colors
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+NAMESPACE=${1:-default}
+AUTO_FIX=false
+if [[ "$2" == "--fix" ]]; then
+  AUTO_FIX=true
+fi
+
+echo -e "${BLUE}🔐 Running Kubernetes security diagnostics in namespace: $NAMESPACE${NC}"
+echo "======================================================================"
+
+# Cluster-wide OIDC provider check (once)
+OIDC_URL=$(aws eks describe-cluster --name "$(kubectl config current-context | awk -F'@' '{print $2}')" --query "cluster.identity.oidc.issuer" --output text 2>/dev/null)
+if [[ -z "$OIDC_URL" || "$OIDC_URL" == "None" ]]; then
+  echo -e "${RED}❗ No OIDC provider detected for EKS cluster. IRSA will not work.${NC}"
+else
+  echo -e "${GREEN}✅ OIDC Provider is configured:${NC} $OIDC_URL"
+fi
+
+# Map ServiceAccounts for usage count
+declare -A SA_USAGE
+for sa in $(kubectl get pods -n "$NAMESPACE" -o jsonpath='{.items[*].spec.serviceAccountName}'); do
+  ((SA_USAGE["$sa"]++))
+done
+
+pods=$(kubectl get pods -n "$NAMESPACE" --no-headers | awk '{print $1}')
+
+for pod in $pods; do
+  echo ""
+  echo -e "${BLUE}🔍 Inspecting Pod: $pod${NC}"
+  echo "--------------------------------------------------"
+
+  SA_NAME=$(kubectl get pod "$pod" -n "$NAMESPACE" -o jsonpath='{.spec.serviceAccountName}')
+  TOKEN_PATH="/var/run/secrets/kubernetes.io/serviceaccount/token"
+
+  # Warn if SA is reused
+  if [[ "${SA_USAGE[$SA_NAME]}" -gt 1 ]]; then
+    echo -e "${YELLOW}⚠️ ServiceAccount '$SA_NAME' is shared by ${SA_USAGE[$SA_NAME]} pods.${NC}"
+  fi
+
+  # Check IRSA annotation
+  IRSA_ROLE=$(kubectl get sa "$SA_NAME" -n "$NAMESPACE" -o jsonpath='{.metadata.annotations.eks\.amazonaws\.com/role-arn}' 2>/dev/null)
+  if [[ -z "$IRSA_ROLE" ]]; then
+    echo -e "${RED}❗ Missing IRSA annotation on ServiceAccount: $SA_NAME${NC}"
+    if $AUTO_FIX; then
+      read -p "🔧 Enter IAM Role ARN to patch IRSA (or leave blank to skip): " input_role
+      if [[ -n "$input_role" ]]; then
+        kubectl annotate sa "$SA_NAME" -n "$NAMESPACE" "eks.amazonaws.com/role-arn=$input_role" --overwrite
+        echo -e "${GREEN}✅ IRSA annotation applied to $SA_NAME${NC}"
+      else
+        echo -e "${YELLOW}⏭️ Skipped annotation.${NC}"
+      fi
+    else
+      echo -e "${BLUE}👉 Manual fix:${NC} kubectl annotate sa $SA_NAME -n $NAMESPACE eks.amazonaws.com/role-arn=<your-iam-role-arn>"
+    fi
+  else
+    echo -e "${GREEN}✅ IRSA Role ARN:${NC} $IRSA_ROLE"
+
+    # Validate IAM trust policy if IRSA role is present
+    ROLE_NAME=$(basename "$IRSA_ROLE")
+    TRUSTED_OIDC=$(aws iam get-role --role-name "$ROLE_NAME" --query "Role.AssumeRolePolicyDocument.Statement[0].Principal.Federated" --output text 2>/dev/null)
+    if [[ "$TRUSTED_OIDC" != *"oidc"* ]]; then
+      echo -e "${RED}❗ IAM role '$ROLE_NAME' does not trust an OIDC provider.${NC}"
+      echo -e "${BLUE}👉 Fix:${NC} Update trust policy in AWS IAM console to trust OIDC URL: $OIDC_URL"
+    else
+      echo -e "${GREEN}✅ IAM Trust Policy is correctly configured for IRSA.${NC}"
+    fi
+  fi
+
+  # Token mount check
+  TOKEN_EXISTS=$(kubectl exec "$pod" -n "$NAMESPACE" -- sh -c "[ -f $TOKEN_PATH ] && echo yes || echo no" 2>/dev/null)
+  if [[ "$TOKEN_EXISTS" == "yes" ]]; then
+    echo -e "${GREEN}✅ ServiceAccount token is mounted${NC}"
+
+    # Decode JWT and show expiration
+    EXP_RAW=$(kubectl exec "$pod" -n "$NAMESPACE" -- sh -c "cut -d. -f2 $TOKEN_PATH | base64 -d 2>/dev/null | jq -r .exp" 2>/dev/null)
+    if [[ "$EXP_RAW" =~ ^[0-9]+$ ]]; then
+      EXP_DATE=$(date -d @"$EXP_RAW")
+      echo -e "${BLUE}📅 Token expires at:${NC} $EXP_DATE"
+    fi
+  else
+    echo -e "${RED}❗ Token not mounted in pod.${NC}"
+    echo -e "${YELLOW}📌 Likely reason: automountServiceAccountToken: false${NC}"
+    echo -e "${BLUE}👉 Fix: add 'automountServiceAccountToken: true' in your pod/deployment spec.${NC}"
+  fi
+
+  # IAM identity test
+  echo -e "${BLUE}🔄 Testing AWS identity...${NC}"
+  STS=$(kubectl exec "$pod" -n "$NAMESPACE" -- sh -c "command -v aws" 2>/dev/null)
+  if [[ -z "$STS" ]]; then
+    echo -e "${YELLOW}⚠️ awscli is not installed in this container — skipping STS check.${NC}"
+  else
+    IAM_RESULT=$(kubectl exec "$pod" -n "$NAMESPACE" -- aws sts get-caller-identity --output json 2>/dev/null)
+    if [[ -n "$IAM_RESULT" ]]; then
+      echo -e "${GREEN}✅ IAM identity is valid:${NC}"
+      echo "$IAM_RESULT" | jq
+    else
+      echo -e "${RED}❗ AWS STS call failed.${NC}"
+      echo -e "${YELLOW}👉 Possible causes:${NC}"
+      echo "   - Role not trusted"
+      echo "   - Pod not using IRSA"
+      echo "   - Missing AWS permissions"
+    fi
+  fi
+
+  # RBAC inspection
+  RBINDINGS=$(kubectl get rolebinding,clusterrolebinding -A --field-selector=subjects[0].name="$SA_NAME" -o name 2>/dev/null)
+  if [[ -n "$RBINDINGS" ]]; then
+    echo -e "${GREEN}✅ ServiceAccount is bound to RBAC roles:${NC}"
+    echo "$RBINDINGS"
+  else
+    echo -e "${YELLOW}⚠️ No RoleBinding or ClusterRoleBinding found for SA '$SA_NAME'.${NC}"
+    echo -e "${BLUE}👉 Fix: Create appropriate RoleBinding to give permissions.${NC}"
+  fi
+
+  # Warn if sensitive env vars are exposed
+  ENV_VARS=$(kubectl get pod "$pod" -n "$NAMESPACE" -o jsonpath='{.spec.containers[*].env[*].name}')
+  for var in $ENV_VARS; do
+    if [[ "$var" =~ (SECRET|KEY|TOKEN|PASS|PWD) ]]; then
+      echo -e "${RED}❗ Potential exposed sensitive variable: $var${NC}"
+      echo -e "${BLUE}👉 Use Kubernetes Secrets instead of plaintext values.${NC}"
+    fi
+  done
+done
+
+echo ""
+echo -e "${GREEN}✅ Security diagnostics complete for namespace: $NAMESPACE${NC}"
+echo -e "${BLUE}📌 Tip:${NC} Use ${YELLOW}--fix${NC} to patch missing IRSA annotations."
+
+
+
+28. scripts/k8s-network-diagnose.sh
+
+#!/bin/bash
+
+# Colors
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+NAMESPACE=${1:-default}
+echo -e "${BLUE}🌐 Starting advanced networking diagnostics for namespace: $NAMESPACE${NC}"
+echo "==========================================================================="
+
+pods=$(kubectl get pods -n "$NAMESPACE" --no-headers | awk '{print $1}')
+services=$(kubectl get svc -n "$NAMESPACE" --no-headers | awk '{print $1}')
+network_policies=$(kubectl get networkpolicy -n "$NAMESPACE" --no-headers 2>/dev/null | wc -l)
+
+# DNS, Service Reachability, and Port Matching
+for pod in $pods; do
+  echo ""
+  echo -e "${BLUE}🔍 Pod: $pod${NC}"
+  echo "--------------------------------------------------"
+
+  # DNS Test
+  DNS_RESULT=$(kubectl exec "$pod" -n "$NAMESPACE" -- nslookup kubernetes.default 2>/dev/null)
+  if [[ "$DNS_RESULT" == *"Name:"* ]]; then
+    echo -e "${GREEN}✅ DNS resolution working${NC}"
+  else
+    echo -e "${RED}❗ DNS resolution failed${NC}"
+    echo -e "${YELLOW}👉 Check CoreDNS logs: kubectl logs -n kube-system -l k8s-app=kube-dns${NC}"
+  fi
+
+  # Curl Service Check (ClusterIP reach)
+  for svc in $services; do
+    REACH=$(kubectl exec "$pod" -n "$NAMESPACE" -- sh -c "timeout 2 curl -s http://$svc:80" 2>/dev/null)
+    if [[ -z "$REACH" ]]; then
+      echo -e "${YELLOW}⚠️ Pod cannot reach service $svc on port 80${NC}"
+    else
+      echo -e "${GREEN}✅ Pod can reach service $svc:80${NC}"
+    fi
+  done
+done
+
+# Service-to-Pod Mapping & Port Matching
+echo ""
+echo -e "${BLUE}🔎 Checking Service endpoint and port integrity...${NC}"
+echo "==========================================================="
+
+for svc in $services; do
+  echo ""
+  echo -e "${BLUE}🔧 Service: $svc${NC}"
+  SELECTOR=$(kubectl get svc "$svc" -n "$NAMESPACE" -o jsonpath='{.spec.selector}')
+  if [[ -z "$SELECTOR" ]]; then
+    echo -e "${YELLOW}⚠️ No selector set. Headless or ExternalName?${NC}"
+    continue
+  fi
+
+  ENDPOINTS=$(kubectl get endpoints "$svc" -n "$NAMESPACE" -o jsonpath='{.subsets[*].addresses[*].ip}')
+  if [[ -z "$ENDPOINTS" ]]; then
+    echo -e "${RED}❗ No endpoints. Service has no backing pods.${NC}"
+    echo -e "${BLUE}👉 Check pod labels or deployment readiness.${NC}"
+  else
+    echo -e "${GREEN}✅ Service has active endpoints${NC}"
+  fi
+
+  TARGET_PORT=$(kubectl get svc "$svc" -n "$NAMESPACE" -o jsonpath='{.spec.ports[0].targetPort}')
+  SELECTOR_KEY=$(kubectl get svc "$svc" -n "$NAMESPACE" -o jsonpath='{range $k,$v := .spec.selector}{$k}={$v},{end}' | sed 's/,$//')
+  POD_MATCH=$(kubectl get pods -n "$NAMESPACE" -l "$SELECTOR_KEY" -o jsonpath='{.items[0].spec.containers[0].ports[0].containerPort}' 2>/dev/null)
+
+  if [[ "$TARGET_PORT" != "$POD_MATCH" ]]; then
+    echo -e "${YELLOW}⚠️ Port mismatch: targetPort=$TARGET_PORT, containerPort=$POD_MATCH${NC}"
+  else
+    echo -e "${GREEN}✅ Port alignment OK (targetPort=$TARGET_PORT)${NC}"
+  fi
+done
+
+# NetworkPolicy Analysis
+echo ""
+echo -e "${BLUE}🔐 NetworkPolicy status check...${NC}"
+if [[ "$network_policies" -eq 0 ]]; then
+  echo -e "${YELLOW}⚠️ No NetworkPolicies exist. Namespace traffic is unrestricted.${NC}"
+else
+  echo -e "${GREEN}✅ $network_policies NetworkPolicies detected${NC}"
+  echo -e "${YELLOW}📌 Verify they allow ingress/egress as expected${NC}"
+fi
+
+# Ingress Route Test (basic simulation)
+INGRESS=$(kubectl get ingress -n "$NAMESPACE" --no-headers 2>/dev/null | awk '{print $1}')
+if [[ -n "$INGRESS" ]]; then
+  echo ""
+  echo -e "${BLUE}🌐 Found Ingress: $INGRESS — Simulating HTTP test (optional)...${NC}"
+  HOST=$(kubectl get ingress "$INGRESS" -n "$NAMESPACE" -o jsonpath='{.spec.rules[0].host}')
+  if [[ -n "$HOST" ]]; then
+    curl_output=$(curl -s -o /dev/null -w "%{http_code}" --max-time 3 "http://$HOST")
+    if [[ "$curl_output" == "200" ]]; then
+      echo -e "${GREEN}✅ Ingress route returned HTTP 200${NC}"
+    else
+      echo -e "${YELLOW}⚠️ Ingress returned status $curl_output — check backend service and path${NC}"
+    fi
+  else
+    echo -e "${YELLOW}⚠️ Ingress host not set — skip external route test${NC}"
+  fi
+else
+  echo ""
+  echo -e "${YELLOW}⚠️ No Ingress objects found in this namespace.${NC}"
+fi
+
+# Service Type Analysis
+echo ""
+echo -e "${BLUE}🛠 Analyzing Service types...${NC}"
+kubectl get svc -n "$NAMESPACE" -o custom-columns=NAME:.metadata.name,TYPE:.spec.type,CLUSTER-IP:.spec.clusterIP,EXTERNAL-IP:.status.loadBalancer.ingress[0].ip --no-headers | while read -r line; do
+  NAME=$(echo $line | awk '{print $1}')
+  TYPE=$(echo $line | awk '{print $2}')
+  EXT_IP=$(echo $line | awk '{print $4}')
+
+  case "$TYPE" in
+    LoadBalancer)
+      if [[ -z "$EXT_IP" || "$EXT_IP" == "<none>" ]]; then
+        echo -e "${RED}❗ LoadBalancer service $NAME has no external IP${NC}"
+      else
+        echo -e "${GREEN}✅ LoadBalancer $NAME is exposed at $EXT_IP${NC}"
+      fi
+      ;;
+    NodePort)
+      echo -e "${YELLOW}⚠️ NodePort service $NAME may require firewall or node IP access${NC}"
+      ;;
+    ExternalName)
+      echo -e "${BLUE}🔗 ExternalName service $NAME redirects to external DNS name${NC}"
+      ;;
+    *)
+      echo -e "${GREEN}✅ Service $NAME (type=$TYPE) is valid${NC}"
+      ;;
+  esac
+done
+
+# Duplicate endpoint IP check
+echo ""
+echo -e "${BLUE}🧪 Scanning for duplicate endpoint IPs...${NC}"
+DUPES=$(kubectl get endpoints -n "$NAMESPACE" -o jsonpath='{.items[*].subsets[*].addresses[*].ip}' | tr ' ' '\n' | sort | uniq -d)
+if [[ -n "$DUPES" ]]; then
+  echo -e "${RED}❗ Duplicate endpoint IPs detected:${NC} $DUPES"
+  echo -e "${YELLOW}👉 May indicate misconfigured selectors or replica conflict${NC}"
+else
+  echo -e "${GREEN}✅ No duplicate endpoint IPs found${NC}"
+fi
+
+echo ""
+echo -e "${GREEN}✅ Full networking diagnostics complete for namespace: $NAMESPACE${NC}"
+
+
+
+29. scripts/k8-pod-lifecycle-stability-diagnose.sh
+
+#!/bin/bash
+
+# Color codes
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+NAMESPACE=${1:-default}
+AUTO_FIX=false
+if [[ "$2" == "--fix" ]]; then
+  AUTO_FIX=true
+fi
+
+echo -e "${BLUE}🚀 Diagnosing Kubernetes pods in namespace: $NAMESPACE${NC}"
+echo "========================================================="
+
+pods=$(kubectl get pods -n "$NAMESPACE" --no-headers | awk '{print $1}')
+
+for pod in $pods; do
+  echo ""
+  echo -e "${BLUE}🔍 Inspecting Pod: $pod${NC}"
+  echo "--------------------------------------------------"
+
+  IS_TERMINATING=$(kubectl get pod "$pod" -n "$NAMESPACE" -o jsonpath='{.metadata.deletionTimestamp}')
+  if [[ -n "$IS_TERMINATING" ]]; then
+    echo -e "${YELLOW}⏳ Pod is terminating... skipping.${NC}"
+    continue
+  fi
+
+  STATUS=$(kubectl get pod "$pod" -n "$NAMESPACE" -o jsonpath='{.status.phase}')
+  REASON=$(kubectl get pod "$pod" -n "$NAMESPACE" -o jsonpath='{.status.containerStatuses[0].state.waiting.reason}' 2>/dev/null)
+  REASON=${REASON:-None}
+  RESTARTS=$(kubectl get pod "$pod" -n "$NAMESPACE" -o jsonpath='{.status.containerStatuses[0].restartCount}' 2>/dev/null)
+  LAST_STATE=$(kubectl get pod "$pod" -n "$NAMESPACE" -o jsonpath='{.status.containerStatuses[0].lastState.terminated.reason}' 2>/dev/null)
+
+  echo -e "${BLUE}📝 Status:${NC} $STATUS"
+  [[ "$REASON" != "None" ]] && echo -e "${BLUE}🧾 Reason:${NC} $REASON"
+  echo -e "${BLUE}🔁 Restart count:${NC} ${RESTARTS:-0}"
+
+  if [[ "$REASON" == "CrashLoopBackOff" ]]; then
+    echo -e "${RED}❗ CrashLoopBackOff: Pod is crashing repeatedly.${NC}"
+    if $AUTO_FIX; then
+      read -p "🔧 Delete pod $pod to force restart? (y/n): " confirm
+      if [[ $confirm == "y" ]]; then
+        kubectl delete pod "$pod" -n "$NAMESPACE"
+        echo -e "${GREEN}✅ Pod deleted. Controller will recreate it.${NC}"
+      else
+        echo -e "${YELLOW}⏭️ Skipped deleting pod.${NC}"
+      fi
+    else
+      echo -e "${BLUE}👉 Run manually:${NC} kubectl delete pod $pod -n $NAMESPACE"
+      echo -e "${BLUE}👉 Check logs:${NC} kubectl logs --previous $pod -n $NAMESPACE"
+    fi
+    continue
+  fi
+
+  if [[ "$REASON" == "ImagePullBackOff" || "$REASON" == "ErrImagePull" ]]; then
+    IMAGE=$(kubectl get pod "$pod" -n "$NAMESPACE" -o jsonpath='{.spec.containers[0].image}')
+    echo -e "${RED}❗ Image pull error: Failed to pull image: $IMAGE${NC}"
+    echo -e "${BLUE}👉 Describe pod:${NC} kubectl describe pod $pod -n $NAMESPACE"
+    echo -e "${BLUE}👉 Check image name, tag, or registry credentials${NC}"
+    echo -e "${YELLOW}🔧 Fix: update Deployment/StatefulSet and reapply${NC}"
+    continue
+  fi
+
+  if [[ "$LAST_STATE" == "OOMKilled" ]]; then
+    echo -e "${RED}❗ OOMKilled: Container exceeded memory limit.${NC}"
+    echo -e "${BLUE}👉 Suggested fix:${NC}"
+    echo "   - kubectl edit deployment <name> -n $NAMESPACE"
+    echo "   - Increase memory limit in 'resources.limits.memory'"
+    continue
+  fi
+
+  if [[ "$REASON" == "ContainerCreating" ]]; then
+    echo -e "${YELLOW}⚠️ Container is stuck in creating state.${NC}"
+    echo -e "${BLUE}👉 Run:${NC} kubectl describe pod $pod -n $NAMESPACE | grep -A 5 Events"
+    continue
+  fi
+
+  if [[ "$STATUS" == "Pending" ]]; then
+    echo -e "${RED}❗ Pod is Pending — likely a scheduler constraint.${NC}"
+    echo -e "${BLUE}👉 Run:${NC} kubectl describe pod $pod -n $NAMESPACE"
+    echo -e "${BLUE}👉 Check:${NC} affinity, taints, resource limits, missing PVCs"
+    continue
+  fi
+
+  if [[ "$STATUS" == "Running" && "$RESTARTS" -gt 0 ]]; then
+    echo -e "${YELLOW}⚠️ Pod is running but has restarted $RESTARTS times.${NC}"
+    if [[ "$RESTARTS" -ge 3 && "$AUTO_FIX" = true ]]; then
+      read -p "🔄 Restart pod $pod to reset state? (y/n): " confirm
+      if [[ $confirm == "y" ]]; then
+        kubectl delete pod "$pod" -n "$NAMESPACE"
+        echo -e "${GREEN}✅ Pod deleted to force clean restart.${NC}"
+      else
+        echo -e "${YELLOW}⏭️ Skipped pod deletion.${NC}"
+      fi
+    else
+      echo -e "${BLUE}👉 Review logs:${NC} kubectl logs $pod -n $NAMESPACE"
+      echo -e "${BLUE}👉 Consider tuning probes or memory limits${NC}"
+    fi
+    continue
+  fi
+
+  if [[ "$STATUS" == "Running" && "$RESTARTS" -eq 0 ]]; then
+    echo -e "${GREEN}✅ Pod is healthy and running normally.${NC}"
+  else
+    echo -e "${YELLOW}⚠️ Pod is in unusual state: $STATUS${NC}"
+  fi
+done
+
+echo ""
+echo -e "${BLUE}📦 Scanning Jobs for failure in namespace: $NAMESPACE${NC}"
+echo "========================================================="
+
+jobs=$(kubectl get jobs -n "$NAMESPACE" --no-headers 2>/dev/null | awk '{print $1}')
+
+for job in $jobs; do
+  completions=$(kubectl get job "$job" -n "$NAMESPACE" -o jsonpath='{.status.succeeded}' 2>/dev/null)
+  failures=$(kubectl get job "$job" -n "$NAMESPACE" -o jsonpath='{.status.failed}' 2>/dev/null)
+  backoffLimit=$(kubectl get job "$job" -n "$NAMESPACE" -o jsonpath='{.spec.backoffLimit}' 2>/dev/null)
+
+  if [[ -n "$failures" && -n "$backoffLimit" && "$failures" -ge "$backoffLimit" ]]; then
+    echo -e "${RED}❌ Job $job failed (failures: $failures / backoffLimit: $backoffLimit)${NC}"
+
+    if $AUTO_FIX; then
+      read -p "🔄 Do you want to delete and retry Job $job? (y/n): " confirm
+      if [[ "$confirm" == "y" ]]; then
+        kubectl delete job "$job" -n "$NAMESPACE"
+        echo -e "${GREEN}✅ Job deleted. Reapply manifest to retry.${NC}"
+        echo -e "${BLUE}📌 Reminder:${NC} kubectl apply -f manifests/jobs/$job.yaml"
+      else
+        echo -e "${YELLOW}⏭️ Skipped retrying job.${NC}"
+      fi
+    else
+      echo -e "${BLUE}👉 To retry manually:${NC}"
+      echo "    kubectl delete job $job -n $NAMESPACE"
+      echo "    kubectl apply -f manifests/jobs/$job.yaml"
+    fi
+  fi
+done
+
+echo ""
+echo -e "${GREEN}✅ Diagnostics complete for namespace: $NAMESPACE${NC}"
+echo -e "${BLUE}📌 Tip:${NC} Run again with '${YELLOW}--fix${NC}' to attempt safe automated repairs."
+
+
+
+30. scripts/k8s-probe-diagnose.sh
+
+#!/bin/bash
+
+# Colors
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+NAMESPACE=${1:-default}
+AUTO_FIX=false
+if [[ "$2" == "--fix" ]]; then
+  AUTO_FIX=true
+fi
+
+echo -e "${BLUE}🩺 Starting probe & health check diagnostics in namespace: $NAMESPACE${NC}"
+echo "==========================================================================="
+
+pods=$(kubectl get pods -n "$NAMESPACE" --no-headers | awk '{print $1}')
+
+for pod in $pods; do
+  echo ""
+  echo -e "${BLUE}🔍 Inspecting Pod: $pod${NC}"
+  echo "--------------------------------------------------"
+
+  DESCRIBE=$(kubectl describe pod "$pod" -n "$NAMESPACE")
+
+  # Check readiness
+  if echo "$DESCRIBE" | grep -q "Readiness probe failed"; then
+    echo -e "${RED}❗ Readiness probe failing${NC}"
+  else
+    echo -e "${GREEN}✅ Readiness probe is passing${NC}"
+  fi
+
+  # Check liveness
+  if echo "$DESCRIBE" | grep -q "Liveness probe failed"; then
+    echo -e "${RED}❗ Liveness probe is failing — pod may be restarting${NC}"
+  else
+    echo -e "${GREEN}✅ Liveness probe is passing${NC}"
+  fi
+
+  DEPLOYMENT=$(kubectl get pod "$pod" -n "$NAMESPACE" -o jsonpath='{.metadata.ownerReferences[0].name}')
+  CONTAINER_NAME=$(kubectl get pod "$pod" -n "$NAMESPACE" -o jsonpath='{.spec.containers[0].name}')
+  PATH=$(kubectl get pod "$pod" -n "$NAMESPACE" -o jsonpath='{.spec.containers[0].readinessProbe.httpGet.path}')
+  PORT=$(kubectl get pod "$pod" -n "$NAMESPACE" -o jsonpath='{.spec.containers[0].readinessProbe.httpGet.port}')
+  INIT_DELAY=$(kubectl get pod "$pod" -n "$NAMESPACE" -o jsonpath='{.spec.containers[0].readinessProbe.initialDelaySeconds}')
+  STARTUP_PROBE=$(kubectl get pod "$pod" -n "$NAMESPACE" -o jsonpath='{.spec.containers[0].startupProbe.httpGet.path}' 2>/dev/null)
+
+  # Simulate probe endpoint
+  if [[ -n "$PATH" && -n "$PORT" ]]; then
+    curl_output=$(kubectl exec "$pod" -c "$CONTAINER_NAME" -n "$NAMESPACE" -- curl -s -o /dev/null -w "%{http_code}" "http://localhost:$PORT$PATH")
+    if [[ "$curl_output" == "200" ]]; then
+      echo -e "${GREEN}✅ Probe endpoint returned 200 OK${NC}"
+    else
+      echo -e "${RED}❗ Probe endpoint returned $curl_output${NC}"
+    fi
+  else
+    echo -e "${YELLOW}⚠️ No HTTP probe path or port found — may be TCP or exec probe${NC}"
+  fi
+
+  # Fixes
+  if $AUTO_FIX; then
+    echo -e "${YELLOW}🔧 Fix mode enabled for pod: $pod (from deployment: $DEPLOYMENT)${NC}"
+
+    # 1. Patch initialDelaySeconds if <10
+    if [[ "$INIT_DELAY" -lt 10 ]]; then
+      read -p "🔁 Increase initialDelaySeconds to 10? (y/n): " confirm_delay
+      if [[ "$confirm_delay" == "y" ]]; then
+        kubectl patch deployment "$DEPLOYMENT" -n "$NAMESPACE" \
+          --type='json' \
+          -p="[{'op': 'replace', 'path': '/spec/template/spec/containers/0/readinessProbe/initialDelaySeconds', 'value':10}]"
+        echo -e "${GREEN}✅ Patched initialDelaySeconds to 10s${NC}"
+      else
+        echo -e "${YELLOW}⏭️ Skipped delay patch.${NC}"
+      fi
+    fi
+
+    # 2. Add startupProbe if missing
+    if [[ -z "$STARTUP_PROBE" && -n "$PATH" && -n "$PORT" ]]; then
+      read -p "🛠 Add startupProbe with same path/port as readiness? (y/n): " confirm_startup
+      if [[ "$confirm_startup" == "y" ]]; then
+        kubectl patch deployment "$DEPLOYMENT" -n "$NAMESPACE" \
+          --type='json' \
+          -p="[{
+            'op': 'add',
+            'path': '/spec/template/spec/containers/0/startupProbe',
+            'value': {
+              'httpGet': {
+                'path': '$PATH',
+                'port': $PORT
+              },
+              'initialDelaySeconds': 10,
+              'periodSeconds': 5,
+              'failureThreshold': 12
+            }
+          }]"
+        echo -e "${GREEN}✅ Added startupProbe to deployment $DEPLOYMENT${NC}"
+      else
+        echo -e "${YELLOW}⏭️ Skipped adding startupProbe.${NC}"
+      fi
+    fi
+  fi
+done
+
+echo ""
+echo -e "${GREEN}✅ Probe diagnostics complete for namespace: $NAMESPACE${NC}"
+echo -e "${BLUE}📌 Tip:${NC} Use ${YELLOW}--fix${NC} to patch readiness/startup probe settings."
+
+
+
+31. scripts/k8s-config-scheduling-diagnose.sh
+
+#!/bin/bash
+
+# Colors
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+NAMESPACE=${1:-default}
+AUTO_FIX=false
+if [[ "$2" == "--fix" ]]; then
+  AUTO_FIX=true
+fi
+
+echo -e "${BLUE}🔍 Starting configuration & scheduling diagnostics in namespace: $NAMESPACE${NC}"
+echo "=============================================================================="
+
+pods=$(kubectl get pods -n "$NAMESPACE" --no-headers | awk '{print $1}')
+for pod in $pods; do
+  echo ""
+  echo -e "${BLUE}📦 Inspecting pod: $pod${NC}"
+  echo "--------------------------------------------------"
+
+  # Check if pod is Pending
+  STATUS=$(kubectl get pod "$pod" -n "$NAMESPACE" -o jsonpath='{.status.phase}')
+  if [[ "$STATUS" == "Pending" ]]; then
+    echo -e "${RED}❗ Pod is stuck in Pending state.${NC}"
+    echo -e "${BLUE}🔍 Events:${NC}"
+    kubectl describe pod "$pod" -n "$NAMESPACE" | grep -A 5 "Events"
+  fi
+
+  # Check recent termination
+  EXIT_CODE=$(kubectl get pod "$pod" -n "$NAMESPACE" -o jsonpath='{.status.containerStatuses[0].lastState.terminated.exitCode}' 2>/dev/null)
+  if [[ "$EXIT_CODE" == "1" ]]; then
+    echo -e "${RED}❗ Pod exited with code 1 — possible bad command or startup failure.${NC}"
+    echo -e "${BLUE}👉 Check container spec, entrypoint, or required env/config values${NC}"
+  fi
+
+  # Check missing configMaps/secrets
+  echo -e "${BLUE}🔎 Validating configMap and secret references...${NC}"
+  CM_REFS=$(kubectl get pod "$pod" -n "$NAMESPACE" -o json | jq -r '.spec.containers[].envFrom[]?.configMapRef.name // empty')
+  for cm in $CM_REFS; do
+    if ! kubectl get configmap "$cm" -n "$NAMESPACE" &>/dev/null; then
+      echo -e "${RED}❗ Missing ConfigMap: $cm${NC}"
+      if $AUTO_FIX; then
+        read -p "🛠 Create placeholder ConfigMap '$cm'? (y/n): " confirm
+        [[ "$confirm" == "y" ]] && kubectl create configmap "$cm" -n "$NAMESPACE"
+      fi
+    fi
+  done
+
+  SEC_REFS=$(kubectl get pod "$pod" -n "$NAMESPACE" -o json | jq -r '.spec.containers[].envFrom[]?.secretRef.name // empty')
+  for sec in $SEC_REFS; do
+    if ! kubectl get secret "$sec" -n "$NAMESPACE" &>/dev/null; then
+      echo -e "${RED}❗ Missing Secret: $sec${NC}"
+      if $AUTO_FIX; then
+        read -p "🛠 Create placeholder Secret '$sec'? (y/n): " confirm
+        [[ "$confirm" == "y" ]] && kubectl create secret generic "$sec" -n "$NAMESPACE"
+      fi
+    fi
+  done
+
+  # PVC check
+  VOLUMES=$(kubectl get pod "$pod" -n "$NAMESPACE" -o jsonpath='{.spec.volumes[*].persistentVolumeClaim.claimName}')
+  for pvc in $VOLUMES; do
+    if [[ -n "$pvc" && ! $(kubectl get pvc "$pvc" -n "$NAMESPACE" 2>/dev/null) ]]; then
+      echo -e "${RED}❗ Missing PVC: $pvc${NC}"
+      echo -e "${BLUE}👉 Create PVC or verify storage class setup${NC}"
+    fi
+  done
+
+  # Scheduling diagnostics (affinity, taints)
+  AFFINITY=$(kubectl get pod "$pod" -n "$NAMESPACE" -o jsonpath='{.spec.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[*].matchExpressions[*].key}' 2>/dev/null)
+  if [[ -n "$AFFINITY" ]]; then
+    echo -e "${YELLOW}⚠️ Node affinity is configured — may restrict scheduling${NC}"
+    echo -e "${BLUE}   Affinity key: $AFFINITY${NC}"
+  fi
+
+  TOLERATIONS=$(kubectl get pod "$pod" -n "$NAMESPACE" -o jsonpath='{.spec.tolerations[*].key}' 2>/dev/null)
+  TAINTED_NODES=$(kubectl get nodes -o json | jq -r '.items[].spec.taints[]?.key // empty')
+
+  if [[ -n "$TAINTED_NODES" && -z "$TOLERATIONS" ]]; then
+    echo -e "${RED}❗ Tainted nodes exist, but pod has no tolerations.${NC}"
+    if $AUTO_FIX; then
+      read -p "🛠 Patch toleration to allow scheduling? (y/n): " confirm
+      if [[ "$confirm" == "y" ]]; then
+        DEPLOYMENT=$(kubectl get pod "$pod" -n "$NAMESPACE" -o jsonpath='{.metadata.ownerReferences[0].name}')
+        kubectl patch deployment "$DEPLOYMENT" -n "$NAMESPACE" \
+          --type='json' \
+          -p="[{'op': 'add', 'path': '/spec/template/spec/tolerations', 'value':[{'key':'${TAINTED_NODES%% *}','operator':'Exists','effect':'NoSchedule'}]}]"
+        echo -e "${GREEN}✅ Toleration patched into deployment.${NC}"
+      fi
+    fi
+  fi
+
+  # Resource request check
+  echo -e "${BLUE}🧮 Checking resource requests against node capacity...${NC}"
+  CPU_REQ=$(kubectl get pod "$pod" -n "$NAMESPACE" -o jsonpath='{.spec.containers[0].resources.requests.cpu}')
+  MEM_REQ=$(kubectl get pod "$pod" -n "$NAMESPACE" -o jsonpath='{.spec.containers[0].resources.requests.memory}')
+  NODES=$(kubectl get nodes -o json)
+
+  for node in $(echo "$NODES" | jq -r '.items[].metadata.name'); do
+    CPU_AVAIL=$(echo "$NODES" | jq -r ".items[] | select(.metadata.name==\"$node\") | .status.allocatable.cpu")
+    MEM_AVAIL=$(echo "$NODES" | jq -r ".items[] | select(.metadata.name==\"$node\") | .status.allocatable.memory")
+
+    if [[ "$CPU_REQ" > "$CPU_AVAIL" || "$MEM_REQ" > "$MEM_AVAIL" ]]; then
+      echo -e "${RED}❗ Resource requests too high for node $node${NC}"
+      echo -e "${BLUE}👉 CPU: $CPU_REQ / $CPU_AVAIL, MEM: $MEM_REQ / $MEM_AVAIL${NC}"
+      echo -e "${YELLOW}🛠 Suggest reducing requests or scaling up node size${NC}"
+    fi
+  done
+done
+
+echo ""
+echo -e "${GREEN}✅ Configuration and scheduling diagnostics complete for namespace: $NAMESPACE${NC}"
+echo -e "${BLUE}📌 Tip: Use ${YELLOW}--fix${NC} to auto-create config objects or patch tolerations."
+
+
+
+32. scripts/README.md
+
+# ⚙️ Kubernetes Diagnostic & Utility Scripts
+
+This folder provides production-grade troubleshooting and automation tools for managing Kubernetes workloads across areas like stability, networking, IAM, probes, and scheduling.
+
+---
+
+## 🩺 Diagnostic Scripts
+
+### 1. `k8-pod-lifecycle-stability-diagnose.sh`
+Diagnoses pod lifecycle failures:
+- `CrashLoopBackOff`, `ImagePullBackOff`, `ContainerCreating`
+- `OOMKilled`, high restart counts
+- Job backoff failures
+- Auto-restarts or rollbacks in `--fix` mode
+
+**Usage**
+```bash
+./k8-pod-lifecycle-stability-diagnose.sh <namespace> [--fix]
+
+2. k8s-config-scheduling-diagnose.sh
+Detects configuration & scheduling issues:
+
+Missing ConfigMap, Secret, or PVC
+
+Bad env var refs, toleration/taint mismatches
+
+Overprovisioned CPU/memory
+
+Affinity rules blocking scheduling
+
+--fix mode can:
+
+Create placeholders for ConfigMaps and Secrets
+
+Patch tolerations in deployments
+
+Usage
+
+./k8s-config-scheduling-diagnose.sh <namespace> [--fix]
+
+3. k8s-network-diagnose.sh
+Validates networking inside the cluster:
+
+DNS resolution inside pods
+
+Service reachability (ClusterIP, port 80)
+
+Port mismatch between Services and containers
+
+Empty endpoint mappings
+
+Ingress routing, NetworkPolicy, and LoadBalancer checks
+
+Detects duplicate endpoint IPs
+
+Usage
+
+./k8s-network-diagnose.sh <namespace>
+4. k8s-probe-diagnose.sh
+Checks health probe configuration:
+
+Readiness/liveness probe failures
+
+Probe timing issues (e.g., initialDelaySeconds)
+
+Endpoint behavior (HTTP 4xx/5xx)
+
+Suggests startupProbe for slow boot apps
+
+--fix mode can:
+
+Patch delay thresholds
+
+Add startupProbe based on readiness
+
+Usage
+./k8s-probe-diagnose.sh <namespace> [--fix]
+5. k8s-security-diagnose.sh
+Diagnoses IAM and security issues:
+
+IRSA role annotation and trust policy
+
+Missing ServiceAccount token mounts
+
+Invalid or missing AWS STS identity
+
+Missing RBAC RoleBindings
+
+Exposed secrets in pod environment variables
+
+--fix mode can:
+
+Patch missing IRSA annotations
+
+Usage
+./k8s-security-diagnose.sh <namespace> [--fix]
+⚙️ Utility Scripts
+6. load-generator.sh
+Launches synthetic load (e.g. K6 or Locust) against services for:
+
+HPA testing
+
+Resiliency evaluation
+
+Stress simulation
+
+Usage
+
+./load-generator.sh <namespace>
+7. rollout-recovery.sh
+Automates rollback and status checks for deployments:
+
+Monitors rollout progress
+
+Reverts faulty rollouts using kubectl rollout undo
+
+Outputs logs from failing pods (if any)
+
+Usage
+
+./rollout-recovery.sh <deployment-name> <namespace>
+🧩 Conventions
+All scripts are POSIX-compatible and require kubectl, jq, and optionally awscli
+
+--fix mode requires interactive input and admin permissions
+
+Use kubectl config use-context to target the correct EKS cluster
+
+
+33. scripts/fix-aws-time-skew.sh
+
+#!/bin/bash
+set -euo pipefail
+
+BLUE='\033[1;34m'
+GREEN='\033[0;32m'
+RED='\033[0;31m'
+NC='\033[0m'
+
+echo -e "${BLUE}🔧 Restarting chronyd...${NC}"
+sudo systemctl restart chronyd
+
+echo -e "${BLUE}⏱️ Forcing immediate time sync with 'chronyc makestep'...${NC}"
+sudo chronyc makestep
+
+echo -e "${BLUE}🔍 Checking new system time drift...${NC}"
+chronyc tracking
+
+echo -e "${BLUE}🔐 Verifying AWS credentials (sts get-caller-identity)...${NC}"
+if aws sts get-caller-identity > /dev/null 2>&1; then
+  echo -e "${GREEN}[✔] AWS credentials are now valid. Time is synced.${NC}"
+else
+  echo -e "${RED}[✘] AWS authentication still failing. Check your credentials or session.${NC}"
+  exit 1
+fi
+
+
+
+34. observability/prometheus-deployment.yaml
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+  namespace: workload-suite
+  labels:
+    app: prometheus
+spec:
+  ports:
+  - port: 9090
+    targetPort: 9090
+  selector:
+    app: prometheus
+  type: ClusterIP
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus
+  namespace: workload-suite
+  labels:
+    app: prometheus
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: prometheus
+  template:
+    metadata:
+      labels:
+        app: prometheus
+    spec:
+      containers:
+      - name: prometheus
+        image: prom/prometheus:v2.51.0
+        ports:
+        - containerPort: 9090
+        volumeMounts:
+        - name: config
+          mountPath: /etc/prometheus/
+        - name: data
+          mountPath: /prometheus
+        args:
+        - "--config.file=/etc/prometheus/prometheus.yml"
+      volumes:
+      - name: config
+        configMap:
+          name: prometheus-config
+      - name: data
+        emptyDir: {}                             
+
+
+
+35. observability/grafana-deployment.yaml
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+  namespace: workload-suite
+  labels:
+    app: grafana
+spec:
+  ports:
+  - port: 3000
+    targetPort: 3000
+  selector:
+    app: grafana
+  type: ClusterIP
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  namespace: workload-suite
+  labels:
+    app: grafana
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: grafana
+  template:
+    metadata:
+      labels:
+        app: grafana
+    spec:
+      containers:
+      - name: grafana
+        image: grafana/grafana:10.3.1
+        ports:
+        - containerPort: 3000
+        env:
+        - name: GF_SECURITY_ADMIN_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: grafana-creds
+              key: admin-password
+
+
+
+36. observability/alert-rules.yaml
+
+groups:
+- name: k8s.rules
+  rules:
+  - alert: HighCpuUsage
+    expr: avg(rate(container_cpu_usage_seconds_total[5m])) > 0.9
+    for: 2m
+    labels:
+      severity: warning
+    annotations:
+      summary: "Pod CPU usage is high"
+
+
+
+37. .vscode/extensions.json
+
+{
+  "recommendations": [
+    "ms-kubernetes-tools.vscode-kubernetes-tools",
+    "redhat.vscode-yaml",
+    "hashicorp.terraform",
+    "esbenp.prettier-vscode",
+    "streetsidesoftware.code-spell-checker",
+    "timonwong.shellcheck",
+    "gruntfuggly.todo-tree"
+  ]
+}
+
+
+
+38. .vscode/settings.json
+
+{
+  "yaml.schemas": {
+    "https://json.schemastore.org/kubernetes.json": [
+      "manifests/**/*.yaml"
+    ]
+  },
+  "editor.formatOnSave": true,
+  "files.trimTrailingWhitespace": true,
+  "editor.tabSize": 2,
+  "files.exclude": {
+    "**/.DS_Store": true,
+    "**/node_modules": true,
+    "**/dist": true
+  },
+  "cSpell.language": "en,en-US",
+  "cSpell.words": [
+    "k8s",
+    "ingress",
+    "podspec",
+    "envFrom",
+    "readiness",
+    "liveness",
+    "configmap",
+    "statefulset"
+  ]
+}
+
+
+

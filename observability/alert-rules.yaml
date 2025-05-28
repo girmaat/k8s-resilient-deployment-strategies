@@ -1,0 +1,10 @@
+groups:
+- name: k8s.rules
+  rules:
+  - alert: HighCpuUsage
+    expr: avg(rate(container_cpu_usage_seconds_total[5m])) > 0.9
+    for: 2m
+    labels:
+      severity: warning
+    annotations:
+      summary: "Pod CPU usage is high"

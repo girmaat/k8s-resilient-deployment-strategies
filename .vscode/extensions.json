@@ -1,0 +1,11 @@
+{
+  "recommendations": [
+    "ms-kubernetes-tools.vscode-kubernetes-tools",
+    "redhat.vscode-yaml",
+    "hashicorp.terraform",
+    "esbenp.prettier-vscode",
+    "streetsidesoftware.code-spell-checker",
+    "timonwong.shellcheck",
+    "gruntfuggly.todo-tree"
+  ]
+}

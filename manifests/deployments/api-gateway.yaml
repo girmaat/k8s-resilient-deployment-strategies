@@ -1,0 +1,64 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-gateway
+  namespace: workload-suite
+  labels:
+    app: api-gateway
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: api-gateway
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: api-gateway
+      annotations:
+        prometheus.io/scrape: "true"         # 👈 Enables Prometheus scraping
+        prometheus.io/port: "8080"           # 👈 Must match containerPort
+        prometheus.io/path: "/metrics"       # 👈 Optional, defaults to /metrics
+    spec:
+      serviceAccountName: api-gateway-sa
+      priorityClassName: high-priority
+      containers:
+      - name: api-gateway
+        image: ghcr.io/example/api-gateway:latest
+        ports:
+        - containerPort: 8080
+        envFrom:
+        - configMapRef:
+            name: api-config
+        - secretRef:
+            name: api-secret
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 5
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          failureThreshold: 20
+        resources:
+          requests:
+            cpu: "200m"
+            memory: "256Mi"
+          limits:
+            cpu: "500m"
+            memory: "512Mi"

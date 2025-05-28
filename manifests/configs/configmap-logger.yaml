@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: logger-config
+  namespace: workload-suite
+data:
+  es-host: "elasticsearch.logging.svc"
+  es-port: "9200"

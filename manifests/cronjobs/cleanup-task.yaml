@@ -1,0 +1,38 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: cleanup-task
+  namespace: workload-suite
+  labels:
+    app: cleanup-task
+spec:
+  schedule: "0 */6 * * *"
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 2
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 120                 
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        metadata:
+          labels:
+            app: cleanup-task
+        spec:
+          priorityClassName: low-priority
+          restartPolicy: OnFailure
+          containers:
+          - name: cleaner
+            image: ghcr.io/example/cleanup:latest
+            command: ["/bin/sh", "-c"]
+            args:
+              - python clean_expired.py --retention-days=30
+            env:
+            - name: ENV
+              value: "prod"
+            volumeMounts:
+            - name: temp-workdir
+              mountPath: /tmp/cleanup
+          volumes:
+          - name: temp-workdir
+            emptyDir: {}
